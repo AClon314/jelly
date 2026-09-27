@@ -19,6 +19,7 @@ import {findPackageJson} from "./packagejson";
 import {GlobalState} from "../analysis/globalstate";
 import {fileURLToPath, pathToFileURL} from "url";
 import {resolveESM} from "./esm";
+import {isSvelteFile} from "../parsing/svelte";
 import assert from "assert";
 
 /**
@@ -88,7 +89,8 @@ function* expandRec(path: string, sub: boolean, visited: Set<string>): Generator
             (path.endsWith(".js") || path.endsWith(".es") || path.endsWith(".mjs") || path.endsWith(".cjs") ||
                 (!inNodeModules && (
                     /* include files with these extensions if not inside node_modules */
-                    path.endsWith(".jsx") || path.endsWith(".ts") || path.endsWith(".tsx") || path.endsWith(".mts") || path.endsWith(".cts")
+                    path.endsWith(".jsx") || path.endsWith(".ts") || path.endsWith(".tsx") || path.endsWith(".mts") || path.endsWith(".cts") ||
+                    /* Svelte components (the <script> blocks are analyzed) */ isSvelteFile(path)
                 )) ||
                 /* include shebang files (only probe extension-less files inside node_modules) */
                 ((!inNodeModules || extname(path) === "") && isShebang(path))))
@@ -133,12 +135,15 @@ export function resolveModule(mode: "commonjs" | "module", str: string, file: Fi
     if (str[0] === "/")
         throw new Error("Ignoring absolute module path");
     let filepath: string;
-    if ([".ts", ".tsx", ".mts", ".cts"].includes(extname(file))) {
+    if ([".ts", ".tsx", ".mts", ".cts"].includes(extname(file)) || isSvelteFile(file)) {
         try {
             filepath = a.tsModuleResolver.resolveModuleName(str, file);
         } catch (e) {
             logger.debug(`TypeScript resolver failed to resolve '${str}' from ${file}: ${e}`);
-            throw new Error("TypeScript");
+            if (isSvelteFile(str))
+                filepath = resolveSvelteSpecifier(str, file);
+            else
+                throw new Error("TypeScript");
         }
     } else
         switch (mode) {
@@ -180,7 +185,7 @@ export function resolveModule(mode: "commonjs" | "module", str: string, file: Fi
         logger.debug(`Skipping binary addon file '${filepath}'`);
         return undefined;
     }
-    if (filepath.endsWith(".d.ts") || ![".js", ".jsx", ".es", ".mjs", ".cjs", ".ts", ".tsx", ".mts", ".cts"].includes(extname(filepath))) {
+    if (filepath.endsWith(".d.ts") || ![".js", ".jsx", ".es", ".mjs", ".cjs", ".ts", ".tsx", ".mts", ".cts", ".svelte"].includes(extname(filepath))) {
         logger.debug(`Skipping module with unrecognized extension '${filepath}'`);
         return undefined;
     }
@@ -191,6 +196,36 @@ export function resolveModule(mode: "commonjs" | "module", str: string, file: Fi
     if (logger.isDebugEnabled())
         logger.debug(`Module '${str}' loaded by ${file} resolved to: ${filepath}`);
     return realpathSync(filepath);
+}
+
+/**
+ * Resolves a module specifier that denotes a Svelte component.
+ * The TypeScript compiler does not know about `.svelte` files, so the specifier
+ * is resolved relative to the importing file, and - for aliases such as
+ * `#lib/...` - through the ESM resolver, which understands package.json
+ * `imports`/`exports` while accepting arbitrary file extensions.
+ * @throws exception if the specifier cannot be resolved
+ */
+function resolveSvelteSpecifier(str: string, file: FilePath): string {
+    if (isLocalRequire(str)) {
+        const local = resolve(dirname(file), str);
+        if (isFile(local))
+            return local;
+    }
+    try {
+        const r = resolveESM(str, pathToFileURL(file).href);
+        if (r.startsWith("file:"))
+            return fileURLToPath(r);
+        logger.debug(`Ignoring unexpected URL from resolveESM: ${str} ${file} -> ${r}`);
+    } catch (e) {
+        logger.debug(`ESM resolver failed to resolve Svelte component '${str}' from ${file}: ${e}`);
+    }
+    try { // handles explicit relative paths with the .svelte extension
+        return module.createRequire(file).resolve(str);
+    } catch (e) {
+        logger.debug(`CommonJS resolver failed to resolve Svelte component '${str}' from ${file}: ${e}`);
+    }
+    throw new Error("Svelte");
 }
 
 /**

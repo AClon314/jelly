@@ -3,6 +3,7 @@ import logger from "../misc/logger";
 import {loadOptions, transformFromAstSync, TransformOptions} from "@babel/core";
 import {parse, ParserOptions} from "@babel/parser";
 import {replaceTypeScriptImportExportAssignmentsAndAddConstructors} from "./extras";
+import {isSvelteFile, maskSvelte} from "./svelte";
 import {FragmentState} from "../analysis/fragmentstate";
 
 // Pre-load transform options for both cases of fragmentState being defined or not
@@ -34,6 +35,10 @@ const transformOptions = [false, true].map((fragmentStateDefined) =>
  * @return AST, or null if error occurred
  */
 export function parseAndDesugar(str: string, file: string, f?: FragmentState): File | null {
+
+    // for Svelte components, analyze the contents of the <script> blocks (with the surrounding markup blanked out)
+    if (isSvelteFile(file))
+        str = maskSvelte(str);
 
     // parse the file
     let originalAst: File;
