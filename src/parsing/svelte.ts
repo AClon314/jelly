@@ -97,3 +97,53 @@ export function maskSvelte(source: string): string {
         index = close.end;
     }
 }
+
+/**
+ * Svelte runes that are *value pass-through* compiler macros: they are erased at build time
+ * and are not function calls at all (`$state(x)` evaluates to `x`, `$derived(x)` to `x`, ...).
+ *
+ * Runes that *invoke a callback* (`$effect`, `$effect.pre`, `$effect.root`, `$derived.by`,
+ * `$inspect`) are deliberately **not** listed here: Jelly's external-callback heuristic
+ * (`Operations.invokeExternalCallback`) already produces the correct call edges for the
+ * function arguments of those, and treating them as pass-throughs would lose those edges.
+ *
+ * Two kinds are distinguished:
+ *
+ * - `pure`: the result is a pure function of the argument. `$derived` is read-only and
+ *   `$state.snapshot` takes a plain snapshot, so `⟦arg⟧ ⊆ ⟦result⟧` is exact.
+ * - `mutable`: the result may be (re)assigned from outside the analyzed code — `$state` is
+ *   mutable, `$bindable` is a bound prop, `$props` comes from the parent, and `bind:this`
+ *   assignments are invisible to the analysis. For those, `⟦arg⟧ ∪ @Unknown ⊆ ⟦result⟧`:
+ *   the initial value is kept (more precise than the previous external-call treatment) while
+ *   the unknown part preserves the boundary behaviour, in particular the external-callback
+ *   edges that DOM calls like `canvas.addEventListener(...)` rely on.
+ */
+const SVELTE_PURE_RUNES: ReadonlySet<string> = new Set([
+    "$derived",
+    "$state.snapshot",
+]);
+
+const SVELTE_MUTABLE_RUNES: ReadonlySet<string> = new Set([
+    "$state",
+    "$state.raw",
+    "$state.eager",
+    "$props",
+    "$props.id",
+    "$bindable",
+]);
+
+/** How the result of a Svelte value rune relates to its argument. */
+export type SvelteRuneKind = "pure" | "mutable";
+
+/**
+ * Classifies a (dotted) callee name as a Svelte value rune.
+ * @param name callee name, e.g. `$state` or `$state.raw`
+ * @returns `"pure"`, `"mutable"`, or undefined if the name is not a value rune
+ */
+export function getSvelteRuneKind(name: string): SvelteRuneKind | undefined {
+    if (SVELTE_PURE_RUNES.has(name))
+        return "pure";
+    if (SVELTE_MUTABLE_RUNES.has(name))
+        return "mutable";
+    return undefined;
+}

@@ -43,6 +43,7 @@ import {
     isMaybeUsedAsPromise,
     isParentExpressionStatement
 } from "../misc/asthelpers";
+import {getSvelteRuneKind} from "../parsing/svelte";
 import {
     AccessPathToken,
     AllocationSiteToken,
@@ -103,6 +104,18 @@ import {TokenListener} from "./listeners";
 import micromatch from "micromatch";
 import {callPromiseResolve} from "../natives/nativehelpers";
 import Module from "module";
+
+/**
+ * Returns the dotted name of a callee expression, e.g. `foo` or `foo.bar`, or undefined if the
+ * callee is not a plain (non-computed) identifier or a two-level member expression.
+ */
+function getDottedName(node: Node): string | undefined {
+    if (isIdentifier(node))
+        return node.name;
+    if (isMemberExpression(node) && !node.computed && isIdentifier(node.object) && isIdentifier(node.property))
+        return `${node.object.name}.${node.property.name}`;
+    return undefined;
+}
 
 /**
  * Models of core JavaScript operations used by astvisitor and nativehelpers.
@@ -187,6 +200,30 @@ export class Operations {
         let p = path.get("callee");
         while (p.isParenthesizedExpression())
             p = p.get("expression");
+
+        // Svelte value runes ($state, $derived, $props, $bindable and their member forms) are
+        // compiler macros that are erased at build time, not function calls. Model them as value
+        // pass-throughs: the argument (if any) flows to the result, and no call site is registered,
+        // so they don't pollute the call graph with unresolved/native calls. For mutable runes the
+        // result is additionally unknown, because it may be reassigned from outside the analyzed
+        // code (see parsing/svelte.ts). The binding check avoids hijacking a local variable that
+        // happens to be named `$state`.
+        // Callback-taking runes ($effect, $derived.by, ...) are intentionally excluded.
+        // This must happen before registerCall: a rune is not a call at all.
+        const runeName = getDottedName(p.node);
+        const runeKind = runeName !== undefined && !path.scope.getBinding(runeName.split(".")[0]) ? getSvelteRuneKind(runeName) : undefined;
+        if (runeKind !== undefined) {
+            const runeResultVar = vp.nodeVar(path.node);
+            for (const arg of args)
+                if (isExpression(arg)) {
+                    // constraint: ⟦arg⟧ ⊆ ⟦E0(arg)⟧
+                    this.solver.addSubsetConstraint(this.expVar(arg, path), runeResultVar);
+                }
+            if (runeKind === "mutable")
+                // constraint: @Unknown ∈ ⟦E0(arg)⟧ (the value may be assigned later, e.g. bind:this)
+                this.solver.addAccessPath(UnknownAccessPath.instance, runeResultVar);
+            return;
+        }
 
         const calleeVar = isExpression(p.node) ? this.expVar(p.node, p) : undefined;
 

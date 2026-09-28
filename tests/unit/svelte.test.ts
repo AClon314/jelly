@@ -3,7 +3,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 
 import {parseAndDesugar} from "../../src/parsing/parser";
-import {isSvelteFile, maskSvelte} from "../../src/parsing/svelte";
+import {isSvelteFile, maskSvelte, getSvelteRuneKind} from "../../src/parsing/svelte";
 import {resolveModule} from "../../src/misc/files";
 import {options, resetOptions} from "../../src/options";
 import logger from "../../src/misc/logger";
@@ -75,6 +75,30 @@ describe("tests/unit/svelte", () => {
         test("unterminated script does not throw", () => {
             const broken = "<script>\nlet x = 1;";
             expect(() => maskSvelte(broken)).not.toThrow();
+        });
+    });
+
+    describe("getSvelteRuneKind", () => {
+        test("classifies pure value runes", () => {
+            expect(getSvelteRuneKind("$derived")).toBe("pure");
+            expect(getSvelteRuneKind("$state.snapshot")).toBe("pure");
+        });
+
+        test("classifies mutable value runes", () => {
+            for (const name of ["$state", "$state.raw", "$state.eager", "$props", "$props.id", "$bindable"])
+                expect(getSvelteRuneKind(name)).toBe("mutable");
+        });
+
+        test("rejects runes that invoke a callback", () => {
+            // these must stay ordinary (external) calls so that their callback arguments
+            // keep producing call edges via the external-callback heuristic
+            for (const name of ["$effect", "$effect.pre", "$effect.root", "$derived.by", "$inspect", "$inspect.trace"])
+                expect(getSvelteRuneKind(name)).toBeUndefined();
+        });
+
+        test("rejects non-runes and member forms of pure runes", () => {
+            for (const name of ["$host", "$state.foo", "$derived.foo", "state", "", "$"])
+                expect(getSvelteRuneKind(name)).toBeUndefined();
         });
     });
 
