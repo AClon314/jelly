@@ -8,6 +8,10 @@
   <script src="https://cdn.jsdelivr.net/npm/cose-base@2.2.0/cose-base.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/webcola@3.4.0/WebCola/cola.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/cytoscape-cola@2.5.1/cytoscape-cola.min.js"></script>
+  <!-- ELK hierarchy layout (layered/Sugiyama) + orthogonal edge routing.
+       cytoscape-elk's UMD takes elkjs from the global `ELK`, so load elkjs first. -->
+  <script src="https://cdn.jsdelivr.net/npm/elkjs@0.9.3/lib/elk.bundled.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/cytoscape-elk@2.3.0/dist/cytoscape-elk.min.js"></script>
   <!-- Extra dependencies for fcose layout
   <script src="https://unpkg.com/layout-base/layout-base.js"></script>
   <script src="https://unpkg.com/cose-base/cose-base.js"></script>
@@ -453,7 +457,11 @@
               'line-color': '#888',
               'target-arrow-color': '#888',
               'target-arrow-shape': 'triangle',
-              'curve-style': 'bezier'
+              // cytoscape-elk computes node positions only; ELK's ORTHOGONAL bend
+              // points are not fed back into cytoscape, so request right-angled
+              // wiring from cytoscape itself (`taxi`).
+              'curve-style': 'taxi',
+              'taxi-direction': 'horizontal'
             }
           },
           {
@@ -500,6 +508,11 @@
         panSpeed: 5,
         panDistance: 15
       });
+      // The UMD build auto-registers when the global `cytoscape` exists; call it
+      // explicitly too so a load-order change fails loudly instead of silently.
+      // (The plugin API is static: `cytoscape.use`, not `cy.use`.)
+      if (typeof cytoscapeElk !== 'undefined')
+        cytoscape.use(cytoscapeElk);
 
       cy.on("layoutstart", e => {
         document.getElementById("layout").classList.add("shadow");
@@ -514,29 +527,55 @@
         document.getElementById("msg").textContent = '';
       });
 
+      // ELK `layered` = Sugiyama layering (cytoscape-cola was force-directed and
+      // produced an unreadable spider web for the call DAG). `direction: RIGHT`
+      // matches the call direction (caller -> callee), `edgeRouting: ORTHOGONAL`
+      // gives right-angled taxi-like wiring.
+      // INCLUDE_CHILDREN: call edges cross package/module boundaries; ELK Layered
+      // requires it to route edges whose endpoints live on different hierarchy
+      // levels (otherwise UnsupportedGraphException).
+      const ELK_OPTIONS = {
+        algorithm: 'layered',
+        'elk.hierarchyHandling': 'INCLUDE_CHILDREN',
+        'elk.direction': 'RIGHT',
+        'elk.edgeRouting': 'ORTHOGONAL',
+        'elk.layered.crossingMinimization.strategy': 'LAYER_SWEEP',
+        'elk.layered.nodePlacement.strategy': 'BRANDES_KOEPF',
+        'elk.layered.considerModelOrder.strategy': 'NODES_AND_EDGES',
+        'elk.spacing.nodeNode': '24',
+        'elk.layered.spacing.nodeNodeBetweenLayers': '60',
+        'elk.padding': '[top=20,left=20,bottom=20,right=20]',
+      };
+      // A non-animated ELK layout over an arbitrary collection. cytoscape-elk resolves
+      // asynchronously, so completion must be awaited via `layout.one('layoutstop')`
+      // before post-processing the resulting coordinates (incremental expand).
+      const layoutCollection = (eles) => eles.layout({
+        name: 'elk',
+        fit: false,
+        animate: false,
+        padding: 20,
+        nodeDimensionsIncludeLabels: true,
+        elk: { ...ELK_OPTIONS },
+      });
+
       let layout;
-      const stopLayout = () => layout?.stop();
+      // Bumped whenever a layout is superseded, so async ELK callbacks from an
+      // abandoned incremental expand cannot reposition the graph behind a newer action.
+      let layoutToken = 0;
+      const stopLayout = () => {
+        layoutToken++;
+        layout?.stop();
+      };
       function newLayout(fit = false) {
         layout = cy.layout({
-          name: 'cola',
-          padding: 20,
-          animate: true,
-          randomize: false,
+          name: 'elk',
           fit,
-          centerGraph: false,
-          avoidOverlap: true,
-          maxSimulationTime: 3000,
+          animate: true,
+          padding: 20,
+          nodeDimensionsIncludeLabels: true,
+          elk: { ...ELK_OPTIONS },
         });
 
-        // layout = cy.layout({
-        //   name: 'fcose',
-        //   quality: "proof",
-        //   padding: 20,
-        //   animate: true,
-        //   randomize: false,
-        //   fit,
-        //   nodeDimensionsIncludeLabels: true,
-        // });
         layout.start();
       }
 
@@ -595,6 +634,85 @@
         });
       });
 
+      /**
+       * Incremental expand: reveal `es` without re-laying out the whole graph.
+       *
+       * 1. remember where every currently visible node is;
+       * 2. `ec.expand(...)`;
+       * 3. pin every pre-existing node back to its remembered coordinates;
+       * 4. lay out only the freshly revealed subtree (ELK layered, honouring the
+       *    module -> function hierarchy) and translate that island next to the
+       *    untouched graph so it cannot overlap it.
+       *
+       * Returns true when something was actually revealed.
+       */
+      function expandIncremental(es) {
+        const before = new Map();
+        cy.nodes().forEach(n => before.set(n.id(), { x: n.position().x, y: n.position().y }));
+
+        ec.expandAllEdges();
+        ec.expand(es.union(es.children(':visible')));
+        ec.collapseAllEdges();
+        showVulnerabilities();
+        hide();
+
+        // Every node the expansion (or a just-undone hide) brought into the graph.
+        const revealed = cy.nodes().filter(n => !before.has(n.id()));
+        if (revealed.size === 0)
+          return false; // already expanded: leave the graph exactly as it is
+        const subtree = es.union(es.descendants()).union(revealed);
+
+        // Old nodes keep their exact coordinates (a compound ancestor still
+        // recomputes its own bounding box from its children, which is expected).
+        const old = cy.nodes().difference(subtree);
+        cy.batch(() => {
+          old.forEach(n => {
+            const p = before.get(n.id());
+            if (p) n.position(p);
+          });
+        });
+
+        // Lay out only the island: the revealed subtree plus its internal edges.
+        // ELK requires every laid-out node's parent to be part of the collection
+        // (its builder crashes on a child whose parent is missing), so bring the
+        // ancestor containers along even though only the subtree is repositioned.
+        const internalEdges = cy.edges().filter(e => subtree.contains(e.source()) && subtree.contains(e.target()));
+        const internal = subtree.union(subtree.ancestors()).union(internalEdges);
+
+        // Vertical anchor: the (old) centre of the node(s) that were expanded.
+        let anchorY = 0, anchorCount = 0;
+        es.forEach(node => {
+          const p = before.get(node.id());
+          if (p) { anchorY += p.y; anchorCount++; }
+        });
+
+        // cytoscape-elk resolves asynchronously, so the island can only be parked
+        // once `layoutstop` fires (otherwise we would move stale coordinates).
+        const token = layoutToken;
+        layout = layoutCollection(internal);
+        layout.one('layoutstop', () => {
+          if (token !== layoutToken)
+            return; // superseded by a newer action
+          const leaves = old.filter(n => n.children().length === 0);
+          const anchor = leaves.size() > 0 ? leaves.boundingBox() : null;
+          if (anchorCount === 0 && anchor) anchorY = anchor.y1;
+          const island = subtree.boundingBox();
+          const gap = 120;
+          subtree.shift({
+            x: (anchor ? anchor.x2 + gap : 0) - island.x1,
+            y: anchorY - (island.y1 + island.y2) / 2,
+          });
+          // If the island landed outside the viewport, pan/zoom onto it (this only
+          // touches the viewport, never the model coordinates pinned above).
+          const view = cy.extent();
+          const placed = subtree.boundingBox();
+          if (placed.x1 < view.x1 || placed.y1 < view.y1 || placed.x2 > view.x2 || placed.y2 > view.y2)
+            cy.animate({ fit: { eles: subtree, padding: 60 }, duration: 400 });
+        });
+        layout.run();
+        return true;
+      }
+
       document.getElementById("collapseAll").addEventListener("click", () => {
         stopLayout();
         ec.expandAllEdges();
@@ -617,23 +735,12 @@
       document.getElementById("expandSelected").addEventListener("click", () => {
         stopLayout();
         const es = cy.$(":selected:visible.cy-expand-collapse-collapsed-node,:selected:visible:compound");
-        if (es.size() > 0) {
-          ec.expandAllEdges();
-          ec.expand(es.union(es.children(":visible")));
-          ec.collapseAllEdges();
-          showVulnerabilities();
-          hide();
-          newLayout();
-        }
+        if (es.size() > 0)
+          expandIncremental(es);
       });
       document.getElementById("expandAllPackages").addEventListener("click", () => {
         stopLayout();
-        ec.expandAllEdges();
-        ec.expand(cy.$('node[kind="package"]:visible.cy-expand-collapse-collapsed-node'));
-        ec.collapseAllEdges();
-        showVulnerabilities();
-        hide();
-        newLayout();
+        expandIncremental(cy.$('node[kind="package"]:visible.cy-expand-collapse-collapsed-node'));
       });
       document.getElementById("expandAll").addEventListener("click", () => {
         stopLayout();
