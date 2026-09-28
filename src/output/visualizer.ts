@@ -8,7 +8,7 @@ import {isIdentifier} from "@babel/types";
 import {VulnerabilityResults} from "../patternmatching/vulnerabilitydetector";
 import {getVulnerabilityId, Vulnerability} from "../typings/vulnerabilities";
 import {constraintVarToStringWithCode, funcToStringWithCode} from "./tostringwithcode";
-import {sep} from "path";
+import {join, sep} from "path";
 
 export interface VisualizerGraphs {
     graphs: Array<{
@@ -453,9 +453,37 @@ function getVisualizerDataFlowGraphs(f: FragmentState): VisualizerGraphs {
     return res;
 }
 
+/**
+ * Expands the template's `<!--#include visualizer/foo.js-->` markers.
+ *
+ * Every include path is relative to `resources/` (also for nested includes). Fragments are
+ * written from column 0; the marker's own indentation is prepended to each non-empty line so
+ * the expanded output keeps the exact layout of the original single-file template. A missing
+ * fragment throws instead of silently leaving a hole in the generated HTML.
+ */
+function expandIncludes(text: string, resourcesDir: string): string {
+    return text.replace(/^([ \t]*)<!--#include[ \t]+(\S+?)[ \t]*-->[ \t]*$/gm, (_match, indent: string, file: string) => {
+        const path = join(resourcesDir, file);
+        let fragment: string;
+        try {
+            fragment = readFileSync(path, "utf-8");
+        } catch (e) {
+            throw new Error(`visualizer.html: cannot include '${file}' (${path}): ${(e as Error).message}`);
+        }
+        fragment = expandIncludes(fragment, resourcesDir);
+        // Drop the fragment's trailing newline: the include marker's own line break takes over,
+        // so the number of lines in the expansion is exactly the fragment's line count.
+        if (fragment.endsWith("\n"))
+            fragment = fragment.slice(0, -1);
+        return fragment.split("\n").map(line => line.length === 0 ? line : indent + line).join("\n");
+    });
+}
+
 function writeVisualizerHtml(filename: string, g: VisualizerGraphs | undefined, dataUrl?: string) {
-    const templateFile = __dirname + `${sep}..${sep}..${sep}resources${sep}visualizer.html`;
-    const t = readFileSync(templateFile, "utf-8");
+    const resourcesDir = __dirname + `${sep}..${sep}..${sep}resources`;
+    const templateFile = resourcesDir + `${sep}visualizer.html`;
+    // Expand includes first: the `$DATA` / `$DATA_URL` placeholders live in fragments too.
+    const t = expandIncludes(readFileSync(templateFile, "utf-8"), resourcesDir);
     // Substitute the whole statements, not the bare `$DATA` / `$DATA_URL` tokens: the template's
     // documentation comments also mention them.
     const urlStatement = "const DATA_URL = $DATA_URL;";

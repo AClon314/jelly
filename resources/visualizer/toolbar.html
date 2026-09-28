@@ -1,0 +1,65 @@
+<h1>Jelly visualizer</h1>
+<div id="info"></div>
+<div id="control">
+<div class="group">
+<button id="collapseAll">Collapse all</button>
+<button id="collapseSelected">Collapse selected</button>
+<button id="expandSelected">Expand selected</button>
+<span class="callgraphMode"><button id="expandAllPackages">Expand all packages</button></span>
+<button id="expandAll">Expand all</button>
+</div>
+<br/>
+<div class="group">
+<button id="showPredecessors">Show predecessors</button>
+<button id="removeSelected">Remove selected</button>
+<button id="removeNonSelected">Remove non-selected</button>
+</div>
+<br/>
+<div class="group">
+<button id="focusSelected">Focus</button>
+<label for="focusDepth"> Depth: </label><input type="number" id="focusDepth" value="2" min="0">
+</div>
+<br/>
+<div class="group">
+<span class="callgraphMode">
+<button id="overview">Overview</button>
+<label for="overviewDepth"> Depth: </label><input type="number" id="overviewDepth" value="3" min="1">
+</span>
+</div>
+<br/>
+<div class="group">
+<button id="layout">Layout</button>
+</div>
+<br/>
+<div class="group">
+<span class="callgraphMode">
+<input type="checkbox" id="showCallDensity"><label for="showCallDensity"> Show call density</label>
+<br/>
+<input type="checkbox" id="highlightReachable"><label for="highlightReachable"> Highlight reachable</label>
+<br/>
+<input type="checkbox" id="hideUnreachable"><label for="hideUnreachable"> Hide unreachable</label>
+</span>
+<span class="dataflowMode">
+<input type="checkbox" id="showValueDensity"><label for="showValueDensity"> Show value density</label>
+</span>
+</div>
+<span id="fields">
+<br/>
+<label for="threshold">Threshold: </label><input type="number" id="threshold" value="0" min="0">
+<br/>
+</span>
+<div class="group">
+<span id="vulnerabilityLevel" hidden>
+Vulnerabilities:<br/>
+<select id="vulnerabilities" hidden><option></option></select>
+<br/>
+<input type="radio" name="vulnerabilityLevel" id="vulnerabilityLevelPackage" value="package" checked><label for="vulnerabilityLevelPackage">Package dependency</label>
+<br/>
+<input type="radio" name="vulnerabilityLevel" id="vulnerabilityLevelModule" value="module"><label for="vulnerabilityLevelModule">Module dependency</label>
+<br/>
+<input type="radio" name="vulnerabilityLevel" id="vulnerabilityLevelFunction" value="function"><label for="vulnerabilityLevelFunction">Function reachability</label>
+</span>
+</div>
+</div>
+<select id="dataset" hidden></select>
+<div id="msg"></div>

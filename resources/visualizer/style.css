@@ -1,0 +1,148 @@
+body {
+  font-family: sans-serif;
+  overflow: hidden;
+}
+#cy {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  right: 0;
+  z-index: 900;
+}
+#info {
+  position: absolute;
+  bottom: 20px;
+  left: 10px;
+  z-index: 800;
+  opacity: 0.8;
+  font-size: 15px;
+}
+#control {
+  position: absolute;
+  top: 20px;
+  right: 20px;
+  text-align: right;
+  max-width: calc(100% - 250px);
+}
+.group {
+  background: rgba(255, 255, 255, .7);
+  padding: 2px 4px 2px 4px;
+  text-align: left;
+  display: inline-block;
+  z-index: 999;
+  position: relative;
+}
+#fields {
+  z-index: 999;
+  position: relative;
+}
+#fields label {
+  background: rgba(255, 255, 255, .7);
+  padding: 5px;
+}
+#dataset {
+  position: absolute;
+  top: 50px;
+  left: 10px;
+  z-index: 999;
+}
+#msg {
+  position: absolute;
+  margin-top: 10px;
+  bottom: 20px;
+  right: 20px;
+  z-index: 999;
+  background: rgba(255, 255, 255, .7);
+  padding: 4px;
+}
+/* Off-screen neighbour bubbles. The layer itself must not swallow canvas drags
+   (panzoom), so only the bubbles are clickable. z-index sits above #cy (900) and
+   below the control panels (999), so the panels stay on top and usable. */
+#offscreen {
+  position: absolute;
+  left: 0;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 950;
+  pointer-events: none;
+  overflow: hidden;
+}
+.offbubble {
+  position: absolute;
+  transform: translate(-50%, -50%);
+  pointer-events: auto;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  /* Fixed width (and the HALF_W/HALF_H constants in the script) keeps the
+     edge-clamping math exact without measuring the DOM every frame. */
+  width: 84px;
+  box-sizing: border-box;
+  padding: 1px 4px;
+  border: 1px solid #3050c0;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, .85);
+  font-size: 10px;
+  white-space: nowrap;
+}
+/* Anchor bubbles *inside* the viewport edge they landed on, otherwise half of a
+   left/right bubble hangs outside and gets clipped by #offscreen's overflow. */
+.offbubble.lane-left {
+  transform: translate(0, -50%);
+}
+.offbubble.lane-right {
+  transform: translate(-100%, -50%);
+}
+.offbubble.lane-top {
+  transform: translate(-50%, 0);
+}
+.offbubble.lane-bottom {
+  transform: translate(-50%, -100%);
+}
+.offbubble .arrow {
+  display: inline-block;
+  color: #3050c0;
+  font-size: 11px;
+}
+.offbubble .label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+h1 {
+  font-variant: small-caps;
+  opacity: 0.5;
+  font-size: 25px;
+}
+button {
+  height: 25px;
+  background-color: white;
+  border-radius: 1px;
+  cursor: pointer;
+}
+.cy-panzoom {
+  position: absolute;
+  top: 100px;
+  left: 20px;
+}
+/* Right-button drag panning. The class is toggled by the native-DOM shim in the
+   script: cytoscape (and cytoscape-panzoom) only wire up the left button. */
+#cy.panning-right {
+  cursor: grabbing;
+}
+.shadow {
+  box-shadow: inset 1px 1px 4px #aaa;
+  background-color: #eee;
+}
+body.callgraphModeHidden .callgraphMode {
+  display: none;
+}
+body.dataflowModeHidden .dataflowMode {
+  display: none;
+}
+input[type=number] {
+  width: 60px;
+  height: 30px;
+}
