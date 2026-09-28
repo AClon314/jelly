@@ -451,6 +451,27 @@
             }
           },
           {
+            // S3e Overview: one synthetic node per module directory (see buildOverviewElements).
+            selector: 'node[kind="directory"]',
+            style: {
+              'label': 'data(label)',
+              'font-size': '12px',
+              'text-valign': 'center',
+              'text-halign': 'center',
+              'text-wrap': 'wrap',
+              'shape': 'round-rectangle',
+              'background-color': '#d7dcff',
+              'border-width': '1px',
+              'border-color': '#3050c0',
+              'width': function (node) {
+                return (70 + Math.sqrt(node.data('weight')) * 3) + 'px';
+              },
+              'height': function (node) {
+                return (30 + Math.sqrt(node.data('weight')) * 1.5) + 'px';
+              }
+            }
+          },
+          {
             selector: 'edge',
             style: {
               'width': 1,
@@ -462,6 +483,25 @@
               // wiring from cytoscape itself (`taxi`).
               'curve-style': 'taxi',
               'taxi-direction': 'horizontal'
+            }
+          },
+          {
+            // S3e Overview: aggregated directory -> directory edge (weight = number of
+            // original call/require edges it represents).
+            selector: 'edge[kind="overview"]',
+            style: {
+              'width': function (edge) {
+                return (1 + Math.log2(edge.data('weight'))) + 'px';
+              },
+              'line-color': '#8090c0',
+              'target-arrow-color': '#8090c0',
+              'label': function (edge) {
+                return edge.data('weight') > 1 ? String(edge.data('weight')) : '';
+              },
+              'font-size': '8px',
+              'text-valign': 'center',
+              'text-halign': 'center',
+              'color': '#5060a0'
             }
           },
           {
@@ -580,16 +620,38 @@
       }
 
       let removed;
+      // Synthesized elements of the Overview view (directory nodes + aggregated
+      // edges). Kept out of `removed` so the two views cannot resurrect each other:
+      // `hide()` drops the overview first, then restores `removed`.
+      let overview;
+      // Depth (path segments) the current overview was built with, needed by the
+      // drill-down to regroup exactly the same directories.
+      let overviewDepthUsed = 3;
+
+      // Puts everything Overview / Focus / Remove took out back into the graph. Shared
+      // by `hide()` and the Overview entry point so there is exactly one restore path.
+      function restoreRemoved() {
+        if (!removed)
+          return;
+        removed.filter("node").restore();
+        removed.filter("edge").forEach(e => {
+          if (e.source().inside() && e.target().inside())
+            e.restore();
+        });
+        removed = removed.filter(":removed");
+      }
+
+      function clearOverview() {
+        if (!overview)
+          return;
+        overview.remove();
+        overview = undefined;
+      }
+
       function hide() {
         stopLayout();
-        if (removed) {
-          removed.filter("node").restore();
-          removed.filter("edge").forEach(e => {
-            if (e.source().inside() && e.target().inside())
-              e.restore();
-          });
-          removed = removed.filter(":removed");
-        }
+        clearOverview();
+        restoreRemoved();
         const threshold = document.getElementById("threshold").value;
         const count = graph.kind === "callgraph" ? "callCount" : graph.kind === "dataflow" ? "tokenCount" : undefined;
         const queries = [];
@@ -728,14 +790,14 @@
        * A selected *compound* seeds the BFS with its descendants, so focusing a module keeps
        * the module's functions rather than just the empty container.
        */
-      function focusSelected() {
+      function focusSelected(depthOverride) {
         const msg = document.getElementById("msg");
         const selected = cy.$("node:selected");
         if (selected.size() === 0) {
           msg.textContent = "Focus: select a node first (nothing is selected).";
           return;
         }
-        const rawDepth = Number(document.getElementById("focusDepth").value);
+        const rawDepth = depthOverride ?? Number(document.getElementById("focusDepth").value);
         const depth = Number.isFinite(rawDepth) ? Math.max(0, Math.floor(rawDepth)) : 2;
 
         stopLayout();
@@ -778,15 +840,168 @@
         // Edges are only kept when both endpoints survive.
         keep = keep.union(cy.edges().filter(e => keep.contains(e.source()) && keep.contains(e.target())));
 
-        const drop = cy.elements().difference(keep);
-        if (drop.empty())
+        if (!removeOtherThan(keep))
           return; // whole visible graph is already within N hops: nothing to trim
-
-        const r = drop.remove();
-        removed = removed ? removed.union(r) : r;
         ec.collapseRecursively(collapsed.intersection(keep));
         ec.collapseAllEdges();
         newLayout(true); // fit=true is the point: the trimmed subgraph fills the viewport
+      }
+
+      /** Moves everything outside `keep` into the shared `removed` collection. */
+      function removeOtherThan(keep) {
+        const drop = cy.elements().difference(keep);
+        if (drop.empty())
+          return false;
+        const r = drop.remove();
+        removed = removed ? removed.union(r) : r;
+        return true;
+      }
+
+      // ---- Overview (S3e): directory-level aggregation -------------------------
+      //
+      // The full call graph is a per-function spider web (1885 nodes, ~40k edge
+      // crossings). Overview replaces it with one synthetic node per module
+      // *directory* and one aggregated edge per ordered directory pair, i.e. a
+      // ~17-node "module map" that answers "which subsystems talk to which".
+      //
+      // Why no compound layer: the existing hierarchy is package > module > function,
+      // and a directory cuts across it (it is not a fifth well-defined level; a module
+      // has exactly one directory, but a directory can hold modules from several
+      // packages, and none of the existing parents means "directory"). Synthesizing
+      // plain nodes keeps `cytoscape-expand-collapse` — whose whole model is that
+      // three-level compound tree — untouched. Erasing the originals into the shared
+      // `removed` collection and restoring them through `hide()` is the entire
+      // integration; the alternative (temporary compound parents) would have to fake
+      // package/module ancestry and fight expand-collapse.
+
+      // File path behind a node, used to derive its directory. Callgraph function
+      // nodes carry it in `fullName` ("<name> @ <path>:<line>:<col>:<endLine>:<endCol>");
+      // module nodes carry it directly in `name`. Package/variable nodes have no path.
+      function nodeFilePath(node) {
+        if (node.data("kind") === "module")
+          return node.data("name") ?? "";
+        const full = node.data("fullName") ?? "";
+        const at = full.lastIndexOf(" @ ");
+        return at < 0 ? "" : full.slice(at + 3).replace(/:\d+:\d+:\d+:\d+$/, "");
+      }
+
+      // Directory key = the first `depth` segments of the node's parent directory.
+      // `src/lib/bindings/storage/x.ts` -> `src/lib/bindings` (depth 3);
+      // `src/routes/+page.svelte` -> `src/routes`. Configurable via #overviewDepth
+      // (2 = only src/lib vs src/routes, 4 = one more level, e.g. components/workspace).
+      function directoryOfPath(path, depth) {
+        const dir = path.split("/").slice(0, -1);
+        return dir.length === 0 ? "<root>" : dir.slice(0, depth).join("/");
+      }
+
+      function buildOverviewElements(depth) {
+        // 1. Bucket every original node (module + function) by directory.
+        const dirs = new Map(); // dir -> {moduleCount, functionCount, callCount, internal}
+        const dirOf = new Map(); // node id -> dir
+        cy.nodes().filter(n => n.data("kind") === "module" || n.data("kind") === "function").forEach(n => {
+          const dir = directoryOfPath(nodeFilePath(n), depth);
+          dirOf.set(n.id(), dir);
+          const d = dirs.get(dir) ?? { moduleCount: 0, functionCount: 0, callCount: 0, internal: 0 };
+          if (n.data("kind") === "module") d.moduleCount++;
+          else d.functionCount++;
+          d.callCount += n.data("callCount") ?? 0;
+          dirs.set(dir, d);
+        });
+
+        // 2. Aggregate every original edge onto its directory pair. Edges that stay
+        //    inside one directory become a self-loop: count them on the node instead
+        //    of drawing a loop (a loop on every one of 17 nodes is pure noise).
+        const agg = new Map();
+        cy.edges().not(".cy-expand-collapse-collapsed-edge").forEach(e => {
+          const s = dirOf.get(e.source().id());
+          const t = dirOf.get(e.target().id());
+          if (s === undefined || t === undefined)
+            return;
+          if (s === t) {
+            dirs.get(s).internal++;
+            return;
+          }
+          const key = `${s}\u0000${t}`;
+          const a = agg.get(key) ?? { s, t, weight: 0, calls: 0, requires: 0 };
+          a.weight++;
+          if (e.data("kind") === "require") a.requires++;
+          else a.calls++;
+          agg.set(key, a);
+        });
+
+        // 3. Emit nodes and aggregated edges.
+        const maxWeight = Math.max(1, ...[...dirs.values()].map(d => d.moduleCount + d.functionCount));
+        const elements = [];
+        let nextId = 1;
+        const ids = new Map();
+        const nodeId = (dir) => {
+          if (!ids.has(dir)) ids.set(dir, `overview-node-${nextId++}`);
+          return ids.get(dir);
+        };
+        for (const [dir, d] of dirs) {
+          const short = dir.startsWith("src/") ? dir.slice(4) : dir;
+          elements.push({ data: {
+            id: nodeId(dir), kind: "directory", name: short,
+            label: `${short}\n${d.moduleCount} mod \u00b7 ${d.functionCount} fn`,
+            fullName: dir, moduleCount: d.moduleCount, functionCount: d.functionCount,
+            weight: d.moduleCount + d.functionCount,
+            callWeight: Math.round(100 * d.callCount / maxWeight),
+            internalEdges: d.internal,
+          }});
+        }
+        for (const a of agg.values())
+          elements.push({ data: {
+            id: `overview-edge-${nextId++}`, kind: "overview",
+            source: nodeId(a.s), target: nodeId(a.t),
+            weight: a.weight, calls: a.calls, requires: a.requires,
+          }});
+        return elements;
+      }
+
+      /**
+       * Overview: replace the visible graph by its directory-level aggregation.
+       *
+       * Restores whatever Focus/Remove had dropped first (so the aggregation always
+       * sees the whole graph), moves every original element into the same `removed`
+       * collection the other buttons use, then adds the synthetic nodes/edges. Any
+       * later `hide()` (Layout / Collapse all / Expand all / threshold) clears the
+       * overview and restores the originals, so this is never a dead end.
+       */
+      function showOverview() {
+        stopLayout();
+        clearOverview();
+        restoreRemoved();
+        // Materialise every original node/edge first. Collapsed descendants are held
+        // inside cytoscape-expand-collapse (not in `cy.elements()`); removing a collapsed
+        // parent would drop them without ever putting them in `removed`, so recovery
+        // would come back short. Expanding also unwraps bundled edges for aggregation.
+        ec.expandAll();
+        overviewDepthUsed = Math.max(1, Math.floor(Number(document.getElementById("overviewDepth").value) || 3));
+        const elements = buildOverviewElements(overviewDepthUsed);
+        const originals = cy.elements();
+        const r = originals.remove();
+        removed = removed ? removed.union(r) : r;
+        overview = cy.add(elements);
+        newLayout(true);
+      }
+
+      /**
+       * Drill-down: a directory node selects that directory's member modules and
+       * hands them to Focus with depth 0, so the view is exactly the directory's own
+       * subtree (modules + their functions), with no outside hops. Reusing Focus is
+       * deliberate: `expandIncremental` funnels through `hide()`, which restores the
+       * whole graph, so a collapsed-modules drill-down could not be expanded further
+       * anyway (same pre-existing semantics as Focus).
+       */
+      function focusDirectory(dir) {
+        clearOverview();
+        restoreRemoved();
+        const members = cy.nodes().filter(n => n.data("kind") === "module" && directoryOfPath(nodeFilePath(n), overviewDepthUsed) === dir);
+        if (members.size() === 0)
+          return;
+        cy.$(":selected").unselect();
+        members.select();
+        focusSelected(0);
       }
 
       document.getElementById("collapseAll").addEventListener("click", () => {
@@ -845,6 +1060,12 @@
       });
       document.getElementById("focusSelected").addEventListener("click", () => {
         focusSelected();
+      });
+      document.getElementById("overview").addEventListener("click", () => {
+        showOverview();
+      });
+      cy.on("tap", 'node[kind="directory"]', e => {
+        focusDirectory(e.target.data("fullName"));
       });
       document.getElementById("removeSelected").addEventListener("click", () => {
         const es = cy.$(":selected");
@@ -966,6 +1187,7 @@
       function setGraph(i) {
         stopLayout();
         removed = undefined;
+        overview = undefined;
         cy.elements().remove();
         graph = data.graphs[i];
         cy.add(structuredClone(graph.elements));
@@ -1035,6 +1257,13 @@
 <div class="group">
 <button id="focusSelected">Focus</button>
 <label for="focusDepth"> Depth: </label><input type="number" id="focusDepth" value="2" min="0">
+</div>
+<br/>
+<div class="group">
+<span class="callgraphMode">
+<button id="overview">Overview</button>
+<label for="overviewDepth"> Depth: </label><input type="number" id="overviewDepth" value="3" min="1">
+</span>
 </div>
 <br/>
 <div class="group">
