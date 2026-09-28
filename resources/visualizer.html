@@ -136,12 +136,6 @@
       overflow: hidden;
       text-overflow: ellipsis;
     }
-    /* The "+N more" chip is anchored to the bottom centre; it has no direction. */
-    .offbubble.overflow {
-      left: 50%;
-      transform: translate(-50%, -100%);
-      border-style: dashed;
-    }
     h1 {
       font-variant: small-caps;
       opacity: 0.5;
@@ -645,19 +639,26 @@
       //     viewport edge with an arrow pointing at the node ("off-screen enemy indicator").
       //
       // Deliberate limits of this draft (see tmp/oh-my-jelly-0928.md §A2):
-      //   - 1 hop only; recursing would make the cap below meaningless
-      //   - capped at OFFSCREEN_MAX bubbles, the rest is reported as "+N"
+      //   - 1 hop only; recursing would make the sector count meaningless
+      //   - one bubble per 45° screen sector (8 max), so there is no separate cap/overflow chip
       //   - bubbles are not inset around the control panels, they only sit *below* them
       //     in z-order, so an edge bubble can visually overlap a panel
       const OFFSCREEN_MARGIN = 24; // px: a node counts as off-screen once it is this far out
-      const OFFSCREEN_MAX = 12;    // px: bubble cap
+      const OFFSCREEN_SECTORS = 8; // 8 x 45° sectors around the viewport centre
       const BUBBLE_GAP = 92;       // px: minimum spacing between bubbles on the same edge
       const HALF_W = 44;           // px: half of .offbubble's width (see the CSS)
       const HALF_H = 11;           // px: half of .offbubble's height
 
-      const bubbles = new Map();   // node id -> {el, arrow, label}
-      let overflowChip = null;
+      const bubbles = new Map();   // sector index -> {el, arrow, label}
       let offscreenScheduled = false;
+
+      // Sector k spans angles [-180 + k*45, -180 + (k+1)*45) degrees; its representative
+      // direction is the midpoint -180 + (k + .5)*45. atan2() returns [-π, π], so shifting
+      // by π maps it onto [0, 2π) and the sector boundaries stay axis-aligned.
+      const SECTOR_RAD = (Math.PI * 2) / OFFSCREEN_SECTORS;
+      const sectorOf = (dx, dy) =>
+        Math.floor((Math.atan2(dy, dx) + Math.PI) / SECTOR_RAD) % OFFSCREEN_SECTORS;
+      const sectorAngle = (k) => -Math.PI + (k + 0.5) * SECTOR_RAD;
 
       function refreshIncidentEdges() {
         cy.edges().removeClass('incident incident-in incident-out');
@@ -679,8 +680,8 @@
         return sel.connectedEdges().connectedNodes().difference(sel).filter(':visible');
       }
 
-      function bubbleFor(id) {
-        let b = bubbles.get(id);
+      function bubbleFor(key) {
+        let b = bubbles.get(key);
         if (!b) {
           const el = document.createElement('div');
           el.className = 'offbubble';
@@ -691,7 +692,7 @@
           label.className = 'label';
           el.append(arrow, label);
           b = {el, arrow, label};
-          bubbles.set(id, b);
+          bubbles.set(key, b);
           document.getElementById('offscreen').append(el);
         }
         return b;
@@ -700,33 +701,34 @@
       function updateOffscreen() {
         // Early out before touching layout: 'render' fires every frame while panning, and
         // getBoundingClientRect() is not free.
-        if (bubbles.size === 0 && !overflowChip && cy.$('node:selected').empty())
+        if (bubbles.size === 0 && cy.$('node:selected').empty())
           return;
         const box = cy.container().getBoundingClientRect();
         const w = box.width, h = box.height;
         const cx = w / 2, cyc = h / 2;
-        const outside = [];
+
+        // Group the off-screen neighbours by screen sector (45° each around the centre).
+        const groups = new Map(); // sector index -> [{n, p}]
         for (const n of offscreenNeighbours()) {
           const p = n.renderedPosition();
           if (p.x >= OFFSCREEN_MARGIN && p.x <= w - OFFSCREEN_MARGIN &&
               p.y >= OFFSCREEN_MARGIN && p.y <= h - OFFSCREEN_MARGIN)
             continue;
-          outside.push({n, p, degree: n.degree()});
+          const k = sectorOf(p.x - cx, p.y - cyc);
+          if (!groups.has(k))
+            groups.set(k, []);
+          groups.get(k).push({n, p});
         }
-        // Stable order (degree desc, then id) so the shown subset does not flicker while panning.
-        outside.sort((a, b) => b.degree - a.degree || a.n.id().localeCompare(b.n.id()));
-        const shown = outside.slice(0, OFFSCREEN_MAX);
         const placed = [];
 
-        const keep = new Set(shown.map(x => x.n.id()));
-        for (const [id, b] of bubbles)
-          if (!keep.has(id)) {
-            b.el.remove();
-            bubbles.delete(id);
-          }
-
-        for (const {n, p} of shown) {
-          const dx = p.x - cx, dy = p.y - cyc;
+        // One bubble per non-empty sector, aimed at the sector midpoint. Only 8 directions
+        // exist, so they cannot pile up the way per-neighbour bubbles did.
+        for (const [k, members] of groups) {
+          // Deterministic order: the single-node label and the fit target must not flicker
+          // while panning when a sector's membership changes.
+          members.sort((a, b) => a.n.id().localeCompare(b.n.id()));
+          const angle = sectorAngle(k);
+          const dx = Math.cos(angle), dy = Math.sin(angle);
           // Ray/box exit point: the smallest fraction along (dx,dy) that leaves the inset box,
           // and which edge that lands on.
           const scaleX = (cx - OFFSCREEN_MARGIN) / Math.max(Math.abs(dx), 1e-6);
@@ -743,8 +745,16 @@
             x = cx + dx * scaleY;
             along = x;
           }
-          placed.push({n, dx, dy, lane, along, x, y});
+          placed.push({k, members, dx, dy, lane, along, x, y});
         }
+
+        // Sectors that went off-screen; drop their (keyed) DOM nodes so nothing lingers.
+        const keep = new Set(placed.map(it => it.k));
+        for (const [key, b] of bubbles)
+          if (!keep.has(key)) {
+            b.el.remove();
+            bubbles.delete(key);
+          }
 
         // Neighbours in similar directions land on the same edge and would pile up, so push
         // them apart along that edge (1-D, order preserving) and then re-centre the run.
@@ -772,37 +782,33 @@
         }
 
         for (const it of placed) {
-          const {n, dx, dy, lane, along} = it;
-          const b = bubbleFor(n.id());
+          const {k, members, dx, dy, lane, along} = it;
+          const b = bubbleFor(k);
           b.el.className = `offbubble lane-${lane}`;
           b.el.style.left = `${lane === 'left' || lane === 'right' ? it.x : along}px`;
           b.el.style.top = `${lane === 'top' || lane === 'bottom' ? it.y : along}px`;
           b.arrow.style.transform = `rotate(${Math.atan2(dy, dx) * 180 / Math.PI}deg)`;
           // node.data('name') is "<name> <line>:<col>:<endLine>:<endCol>"; the location is
-          // noise in a bubble this small, keep it in the tooltip only.
-          const name = n.data('name') ?? '';
-          b.label.textContent = name.split(' ')[0];
-          b.el.title = n.data('fullName') ?? name;
-          b.el.onclick = () => {
-            const zoom = cy.zoom();
-            const pos = n.position();
-            cy.animate({pan: {x: w / 2 - pos.x * zoom, y: h / 2 - pos.y * zoom}, duration: 250});
-          };
-        }
-
-        const hidden = outside.length - shown.length;
-        if (hidden > 0) {
-          if (!overflowChip) {
-            overflowChip = document.createElement('div');
-            overflowChip.className = 'offbubble overflow';
-            document.getElementById('offscreen').append(overflowChip);
+          // noise in a bubble this small, so labels use the bare name and the tooltip
+          // carries the full identity of every node in the sector.
+          const names = members.map(m => (m.n.data('name') ?? '').split(' ')[0]);
+          b.label.textContent = members.length === 1 ? names[0] : `${members.length} nodes`;
+          const fullNames = members.map(m => m.n.data('fullName') ?? m.n.data('name') ?? '');
+          b.el.title = fullNames.slice(0, 8).join(', ') + (fullNames.length > 8 ? ' \u2026' : '');
+          if (members.length === 1) {
+            const n = members[0].n;
+            b.el.onclick = () => {
+              const zoom = cy.zoom();
+              const pos = n.position();
+              cy.animate({pan: {x: w / 2 - pos.x * zoom, y: h / 2 - pos.y * zoom}, duration: 250});
+            };
+          } else {
+            // Fit the whole sector at once so "5 nodes" is directly inspectable.
+            const eles = cy.collection(members.map(m => m.n));
+            b.el.onclick = () => {
+              cy.animate({fit: {eles, padding: 60}, duration: 250});
+            };
           }
-          overflowChip.style.top = `${h - OFFSCREEN_MARGIN}px`;
-          overflowChip.textContent = `+${hidden} more off-screen`;
-          overflowChip.title = `只有扇入/扇出最大的 ${OFFSCREEN_MAX} 个邻居画了气泡；其余 ${hidden} 个未显示`;
-        } else if (overflowChip) {
-          overflowChip.remove();
-          overflowChip = null;
         }
       }
 
