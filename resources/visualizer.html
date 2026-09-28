@@ -81,6 +81,67 @@
       background: rgba(255, 255, 255, .7);
       padding: 4px;
     }
+    /* Off-screen neighbour bubbles. The layer itself must not swallow canvas drags
+       (panzoom), so only the bubbles are clickable. z-index sits above #cy (900) and
+       below the control panels (999), so the panels stay on top and usable. */
+    #offscreen {
+      position: absolute;
+      left: 0;
+      top: 0;
+      right: 0;
+      bottom: 0;
+      z-index: 950;
+      pointer-events: none;
+      overflow: hidden;
+    }
+    .offbubble {
+      position: absolute;
+      transform: translate(-50%, -50%);
+      pointer-events: auto;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      gap: 2px;
+      /* Fixed width (and the HALF_W/HALF_H constants in the script) keeps the
+         edge-clamping math exact without measuring the DOM every frame. */
+      width: 84px;
+      box-sizing: border-box;
+      padding: 1px 4px;
+      border: 1px solid #3050c0;
+      border-radius: 8px;
+      background: rgba(255, 255, 255, .85);
+      font-size: 10px;
+      white-space: nowrap;
+    }
+    /* Anchor bubbles *inside* the viewport edge they landed on, otherwise half of a
+       left/right bubble hangs outside and gets clipped by #offscreen's overflow. */
+    .offbubble.lane-left {
+      transform: translate(0, -50%);
+    }
+    .offbubble.lane-right {
+      transform: translate(-100%, -50%);
+    }
+    .offbubble.lane-top {
+      transform: translate(-50%, 0);
+    }
+    .offbubble.lane-bottom {
+      transform: translate(-50%, -100%);
+    }
+    .offbubble .arrow {
+      display: inline-block;
+      color: #3050c0;
+      font-size: 11px;
+    }
+    .offbubble .label {
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    /* The "+N more" chip is anchored to the bottom centre; it has no direction. */
+    .offbubble.overflow {
+      left: 50%;
+      transform: translate(-50%, -100%);
+      border-style: dashed;
+    }
     h1 {
       font-variant: small-caps;
       opacity: 0.5;
@@ -541,6 +602,23 @@
                 return 1 + Math.log2((edge.data('weight') ?? 0) + 1);
               }
             }
+          },
+          {
+            // Edges incident to the selected node(s). `incident-out` leaves the selection,
+            // `incident-in` enters it — same ←/→ reading as the graph:func tree view.
+            selector: 'edge.incident',
+            style: {
+              'width': '3px',
+              'line-color': '#3050c0',
+              'target-arrow-color': '#3050c0'
+            }
+          },
+          {
+            selector: 'edge.incident-in',
+            style: {
+              'line-color': '#c05030',
+              'target-arrow-color': '#c05030'
+            }
           }
         ]
       });
@@ -560,12 +638,196 @@
       cy.on("layoutstop", e => {
         document.getElementById("layout").classList.remove("shadow");
       });
+      // --------------------------------------------------------------------------- A1/A2
+      //
+      // A1: highlight the edges incident to the selected node(s).
+      // A2: for neighbours that are outside the viewport, show a bubble clamped to the
+      //     viewport edge with an arrow pointing at the node ("off-screen enemy indicator").
+      //
+      // Deliberate limits of this draft (see tmp/oh-my-jelly-0928.md §A2):
+      //   - 1 hop only; recursing would make the cap below meaningless
+      //   - capped at OFFSCREEN_MAX bubbles, the rest is reported as "+N"
+      //   - bubbles are not inset around the control panels, they only sit *below* them
+      //     in z-order, so an edge bubble can visually overlap a panel
+      const OFFSCREEN_MARGIN = 24; // px: a node counts as off-screen once it is this far out
+      const OFFSCREEN_MAX = 12;    // px: bubble cap
+      const BUBBLE_GAP = 92;       // px: minimum spacing between bubbles on the same edge
+      const HALF_W = 44;           // px: half of .offbubble's width (see the CSS)
+      const HALF_H = 11;           // px: half of .offbubble's height
+
+      const bubbles = new Map();   // node id -> {el, arrow, label}
+      let overflowChip = null;
+      let offscreenScheduled = false;
+
+      function refreshIncidentEdges() {
+        cy.edges().removeClass('incident incident-in incident-out');
+        const sel = cy.$('node:selected');
+        if (sel.empty())
+          return;
+        // `:visible` skips nodes hidden by expand-collapse: they live inside the plugin
+        // (not in cy.elements()), and removing/highlighting them is meaningless.
+        sel.connectedEdges().filter(':visible').forEach(e => {
+          e.addClass('incident');
+          e.addClass(e.source().selected() ? 'incident-out' : 'incident-in');
+        });
+      }
+
+      function offscreenNeighbours() {
+        const sel = cy.$('node:selected');
+        if (sel.empty())
+          return [];
+        return sel.connectedEdges().connectedNodes().difference(sel).filter(':visible');
+      }
+
+      function bubbleFor(id) {
+        let b = bubbles.get(id);
+        if (!b) {
+          const el = document.createElement('div');
+          el.className = 'offbubble';
+          const arrow = document.createElement('span');
+          arrow.className = 'arrow';
+          arrow.textContent = '\u27A4';
+          const label = document.createElement('span');
+          label.className = 'label';
+          el.append(arrow, label);
+          b = {el, arrow, label};
+          bubbles.set(id, b);
+          document.getElementById('offscreen').append(el);
+        }
+        return b;
+      }
+
+      function updateOffscreen() {
+        // Early out before touching layout: 'render' fires every frame while panning, and
+        // getBoundingClientRect() is not free.
+        if (bubbles.size === 0 && !overflowChip && cy.$('node:selected').empty())
+          return;
+        const box = cy.container().getBoundingClientRect();
+        const w = box.width, h = box.height;
+        const cx = w / 2, cyc = h / 2;
+        const outside = [];
+        for (const n of offscreenNeighbours()) {
+          const p = n.renderedPosition();
+          if (p.x >= OFFSCREEN_MARGIN && p.x <= w - OFFSCREEN_MARGIN &&
+              p.y >= OFFSCREEN_MARGIN && p.y <= h - OFFSCREEN_MARGIN)
+            continue;
+          outside.push({n, p, degree: n.degree()});
+        }
+        // Stable order (degree desc, then id) so the shown subset does not flicker while panning.
+        outside.sort((a, b) => b.degree - a.degree || a.n.id().localeCompare(b.n.id()));
+        const shown = outside.slice(0, OFFSCREEN_MAX);
+        const placed = [];
+
+        const keep = new Set(shown.map(x => x.n.id()));
+        for (const [id, b] of bubbles)
+          if (!keep.has(id)) {
+            b.el.remove();
+            bubbles.delete(id);
+          }
+
+        for (const {n, p} of shown) {
+          const dx = p.x - cx, dy = p.y - cyc;
+          // Ray/box exit point: the smallest fraction along (dx,dy) that leaves the inset box,
+          // and which edge that lands on.
+          const scaleX = (cx - OFFSCREEN_MARGIN) / Math.max(Math.abs(dx), 1e-6);
+          const scaleY = (cyc - OFFSCREEN_MARGIN) / Math.max(Math.abs(dy), 1e-6);
+          let lane, along, x, y;
+          if (scaleX <= scaleY) {
+            lane = dx > 0 ? 'right' : 'left';
+            x = dx > 0 ? w - OFFSCREEN_MARGIN : OFFSCREEN_MARGIN;
+            y = cyc + dy * scaleX;
+            along = y;
+          } else {
+            lane = dy > 0 ? 'bottom' : 'top';
+            y = dy > 0 ? h - OFFSCREEN_MARGIN : OFFSCREEN_MARGIN;
+            x = cx + dx * scaleY;
+            along = x;
+          }
+          placed.push({n, dx, dy, lane, along, x, y});
+        }
+
+        // Neighbours in similar directions land on the same edge and would pile up, so push
+        // them apart along that edge (1-D, order preserving) and then re-centre the run.
+        for (const lane of ['left', 'right', 'top', 'bottom']) {
+          const list = placed.filter(it => it.lane === lane);
+          if (list.length < 2)
+            continue;
+          const vertical = lane === 'left' || lane === 'right';
+          const size = vertical ? h : w;
+          // Keep the whole pill inside the edge, not just its anchor point.
+          const half = vertical ? HALF_H : HALF_W;
+          const lo = OFFSCREEN_MARGIN + half, hi = size - OFFSCREEN_MARGIN - half;
+          for (const it of list)
+            it.along = Math.min(Math.max(it.along, lo), hi);
+          list.sort((a, b) => a.along - b.along);
+          // Spread around the original mean with a gap that always fits: shifting the whole
+          // run after pushing it apart does not work (the two corrections cancel out when the
+          // run is longer than the edge, which is exactly when it matters).
+          const gap = Math.min(BUBBLE_GAP, (hi - lo) / Math.max(list.length - 1, 1));
+          const mean = list.reduce((sum, it) => sum + it.along, 0) / list.length;
+          const start = Math.min(Math.max(mean - gap * (list.length - 1) / 2, lo), hi - gap * (list.length - 1));
+          list.forEach((it, i) => {
+            it.along = start + gap * i;
+          });
+        }
+
+        for (const it of placed) {
+          const {n, dx, dy, lane, along} = it;
+          const b = bubbleFor(n.id());
+          b.el.className = `offbubble lane-${lane}`;
+          b.el.style.left = `${lane === 'left' || lane === 'right' ? it.x : along}px`;
+          b.el.style.top = `${lane === 'top' || lane === 'bottom' ? it.y : along}px`;
+          b.arrow.style.transform = `rotate(${Math.atan2(dy, dx) * 180 / Math.PI}deg)`;
+          // node.data('name') is "<name> <line>:<col>:<endLine>:<endCol>"; the location is
+          // noise in a bubble this small, keep it in the tooltip only.
+          const name = n.data('name') ?? '';
+          b.label.textContent = name.split(' ')[0];
+          b.el.title = n.data('fullName') ?? name;
+          b.el.onclick = () => {
+            const zoom = cy.zoom();
+            const pos = n.position();
+            cy.animate({pan: {x: w / 2 - pos.x * zoom, y: h / 2 - pos.y * zoom}, duration: 250});
+          };
+        }
+
+        const hidden = outside.length - shown.length;
+        if (hidden > 0) {
+          if (!overflowChip) {
+            overflowChip = document.createElement('div');
+            overflowChip.className = 'offbubble overflow';
+            document.getElementById('offscreen').append(overflowChip);
+          }
+          overflowChip.style.top = `${h - OFFSCREEN_MARGIN}px`;
+          overflowChip.textContent = `+${hidden} more off-screen`;
+          overflowChip.title = `只有扇入/扇出最大的 ${OFFSCREEN_MAX} 个邻居画了气泡；其余 ${hidden} 个未显示`;
+        } else if (overflowChip) {
+          overflowChip.remove();
+          overflowChip = null;
+        }
+      }
+
+      function scheduleOffscreen() {
+        if (offscreenScheduled)
+          return;
+        offscreenScheduled = true;
+        requestAnimationFrame(() => {
+          offscreenScheduled = false;
+          updateOffscreen();
+        });
+      }
+
       cy.on('select', e => {
         document.getElementById("msg").textContent = e.target?.data()?.fullName ?? '';
+        refreshIncidentEdges();
+        scheduleOffscreen();
       });
       cy.on('unselect', () => {
         document.getElementById("msg").textContent = '';
+        refreshIncidentEdges();
+        scheduleOffscreen();
       });
+      // Pan/zoom/layout animation all go through 'render'; rAF-throttled, so this is cheap.
+      cy.on('render', scheduleOffscreen);
 
       // ELK `layered` = Sugiyama layering (cytoscape-cola was force-directed and
       // produced an unreadable spider web for the call DAG). `direction: RIGHT`
@@ -1193,6 +1455,7 @@
         cy.add(structuredClone(graph.elements));
         ec.collapseAll();
         ec.collapseAllEdges();
+        scheduleOffscreen();
         if (graph.kind === "callgraph")
           document.body.classList.remove("callgraphModeHidden");
         if (graph.kind === "dataflow")
@@ -1304,5 +1567,6 @@ Vulnerabilities:<br/>
 <div id="msg"></div>
 </header>
 <div id="cy"></div>
+<div id="offscreen"></div>
 </body>
 </html>
