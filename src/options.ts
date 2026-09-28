@@ -12,6 +12,7 @@ export const PKG = "pkg" in process;
  */
 export const options: {
     callgraphHtml: string | undefined,
+    callgraphHtmlData: string | undefined,
     dataflowHtml: string | undefined,
     callgraphGraphviz: string | undefined,
     graphvizElideFunctions: boolean,
@@ -90,6 +91,7 @@ export const options: {
     maxFileSize: number | undefined,
 } = {
     callgraphHtml: undefined,
+    callgraphHtmlData: undefined,
     dataflowHtml: undefined,
     callgraphGraphviz: undefined,
     graphvizElideFunctions: false,

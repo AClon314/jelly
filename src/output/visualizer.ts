@@ -453,20 +453,36 @@ function getVisualizerDataFlowGraphs(f: FragmentState): VisualizerGraphs {
     return res;
 }
 
-function writeVisualizerHtml(filename: string, g: VisualizerGraphs) {
-    const DATA = "$DATA";
+function writeVisualizerHtml(filename: string, g: VisualizerGraphs | undefined, dataUrl?: string) {
     const templateFile = __dirname + `${sep}..${sep}..${sep}resources${sep}visualizer.html`;
     const t = readFileSync(templateFile, "utf-8");
-    const i = t.indexOf(DATA); // string.replace doesn't like very long strings
-    const res = t.substring(0, i) + JSON.stringify(g) + t.substring(i + DATA.length);
+    // Substitute the whole statements, not the bare `$DATA` / `$DATA_URL` tokens: the template's
+    // documentation comments also mention them.
+    const urlStatement = "const DATA_URL = $DATA_URL;";
+    const i = t.indexOf(urlStatement);
+    if (i < 0)
+        throw new Error(`visualizer.html is missing '${urlStatement}'`);
+    const withUrl = t.substring(0, i) + `const DATA_URL = ${JSON.stringify(dataUrl ?? null)};` + t.substring(i + urlStatement.length);
+    const dataStatement = "const INLINE_DATA = $DATA;";
+    const j = withUrl.indexOf(dataStatement);
+    if (j < 0)
+        throw new Error(`visualizer.html is missing '${dataStatement}'`);
+    // string.replace doesn't like very long strings (and would interpret $ patterns in the data)
+    const res = withUrl.substring(0, j) + `const INLINE_DATA = ${g === undefined ? "null" : JSON.stringify(g)};` + withUrl.substring(j + dataStatement.length);
     writeFileSync(filename, res);
 }
 
 /**
  * Exports the call graph as an HTML file.
+ * When dataUrl is given, the page fetches that URL (a raw call graph JSON, as written by `-j`)
+ * and builds the graph itself, so the file stays small and can be regenerated independently of
+ * the analysis. Otherwise the data is embedded as before.
  */
-export function exportCallGraphHtml(f: FragmentState, filename: string, vulnerabilities: VulnerabilityResults) {
-    writeVisualizerHtml(filename, getVisualizerCallGraph(f, vulnerabilities));
+export function exportCallGraphHtml(f: FragmentState, filename: string, vulnerabilities: VulnerabilityResults, dataUrl?: string) {
+    if (dataUrl !== undefined)
+        writeVisualizerHtml(filename, undefined, dataUrl);
+    else
+        writeVisualizerHtml(filename, getVisualizerCallGraph(f, vulnerabilities));
 }
 
 /**

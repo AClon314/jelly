@@ -124,6 +124,10 @@ export class AnalysisStateReporter {
             }
         fs.writeSync(fd, `\n ],\n "functions": {`);
         const functionIndices = new Map<FunctionInfo | ModuleInfo, number>();
+        // functionNames / moduleNodes are emitted below so that a consumer (the visualizer) can
+        // rebuild the hierarchy and the labels from the JSON alone, without the analysis.
+        const functionNames = new Array<string>();
+        const moduleNodes = new Array<number>();
         first = true;
         for (const fun of [...this.a.functionInfos.values(), ...this.a.moduleInfos.values()])
             if (fun instanceof FunctionInfo || fun.loc) {
@@ -132,10 +136,19 @@ export class AnalysisStateReporter {
                 const fileIndex = fileIndices.get(fun instanceof ModuleInfo ? fun : fun.moduleInfo);
                 if (fileIndex === undefined)
                     assert.fail(`File index not found for ${fun}`);
+                if (fun instanceof ModuleInfo)
+                    moduleNodes.push(funIndex);
+                functionNames.push(fun instanceof ModuleInfo ? fun.relativePath : fun.name ?? "<anon>");
                 fs.writeSync(fd, `${first ? "" : ","}\n  "${funIndex}": ${JSON.stringify(this.makeLocStr(fileIndex, fun.loc))}`);
                 first = false;
             }
-        fs.writeSync(fd, `\n },\n "calls": {`);
+        fs.writeSync(fd, `\n },\n "functionNames": [`);
+        for (let i = 0; i < functionNames.length; i++)
+            fs.writeSync(fd, `${i === 0 ? "" : ","}\n  ${JSON.stringify(functionNames[i])}`);
+        fs.writeSync(fd, `\n ],\n "moduleNodes": [`);
+        for (let i = 0; i < moduleNodes.length; i++)
+            fs.writeSync(fd, `${i === 0 ? "" : ", "}${moduleNodes[i]}`);
+        fs.writeSync(fd, `],\n "calls": {`);
         const callIndices = new Map<Node, number>();
         first = true;
         for (const call of this.f.callLocations) {
@@ -164,7 +177,26 @@ export class AnalysisStateReporter {
                         fs.writeSync(fd, `${first ? "\n  " : ", "}[${callerIndex}, ${calleeIndex}]`);
                         first = false;
                     }
-        fs.writeSync(fd, `${first ? "" : "\n "}],\n "call2fun": [`);
+        fs.writeSync(fd, `${first ? "" : "\n "}]`);
+        if (options.callgraphRequire) {
+            // The require edges are already part of fun2fun above; repeat them here so that
+            // consumers can distinguish module loading from function calls.
+            fs.writeSync(fd, `,\n "requireEdges": [`);
+            first = true;
+            for (const [src, dsts] of this.f.requireGraph)
+                if (src instanceof FunctionInfo || src.loc)
+                    for (const dst of dsts)
+                        if (dst instanceof FunctionInfo || dst.loc) {
+                            const srcIndex = functionIndices.get(src);
+                            const dstIndex = functionIndices.get(dst);
+                            if (srcIndex === undefined || dstIndex === undefined)
+                                assert.fail(`Function index not found for require edge`);
+                            fs.writeSync(fd, `${first ? "\n  " : ", "}[${srcIndex}, ${dstIndex}]`);
+                            first = false;
+                        }
+            fs.writeSync(fd, `${first ? "" : "\n "}]`);
+        }
+        fs.writeSync(fd, `,\n "call2fun": [`);
         first = true;
         for (const [call, callIndex] of callIndices) {
             const funs = this.f.callToFunction.get(call) || [];

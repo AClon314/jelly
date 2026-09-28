@@ -53,6 +53,22 @@ export type CallGraph = { // TODO: represent special call edges separately from 
     },
 
     /**
+     * Names of the entries in 'functions', by the same index space: the module path for a module
+     * entry and the function name (or "<anon>") for a function entry.
+     *
+     * Emitted by saveCallGraph (the CLI `-j` path). Optional so that older files and the
+     * callGraphToJSON (server) path remain valid; consumers should fall back to the index.
+     */
+    functionNames?: Array<string>;
+
+    /**
+     * Indices in 'functions' that denote a whole module rather than a single function.
+     * Emitted by saveCallGraph. Together with 'functionNames' this is what a consumer needs to
+     * rebuild the package -> module -> function hierarchy of the visualizer without the analysis.
+     */
+    moduleNodes?: Array<number>;
+
+    /**
      * Indices and source locations of calls.
      */
     calls: {
@@ -63,6 +79,14 @@ export type CallGraph = { // TODO: represent special call edges separately from 
      * Caller-callee edges, function to function.
      */
     fun2fun: Array<[number, number]>;
+
+    /**
+     * The subset of 'fun2fun' that represents module loading (require/import) rather than a
+     * function call. The edges are also present in 'fun2fun' so that existing consumers are
+     * unaffected; this list exists so consumers can tell the two kinds apart (the visualizer
+     * renders them differently). Only emitted when require edges are enabled (the default).
+     */
+    requireEdges?: Array<[number, number]>;
 
     /**
      * Caller-callee edges, call site to function.

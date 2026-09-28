@@ -57,6 +57,7 @@ program
     .option("-i, --timeout <seconds>", "limit analysis time", parsePositiveInt)
     .option("-a, --dataflow-html <file>", "save data-flow graph as HTML file")
     .option("-m, --callgraph-html <file>", "save call graph as HTML file")
+    .option("--callgraph-html-data <url>", "with --callgraph-html: make the page fetch this URL (a call graph JSON, e.g. from -j) instead of embedding the data")
     .option("-j, --callgraph-json <file>", "save call graph as JSON file")
     .option("-s, --soundness <file>", "compare with dynamic call graph")
     .option("-n, --graal-home <directory>", "home of graal-nodejs (default: $GRAAL_HOME)")
@@ -365,7 +366,7 @@ async function main() {
 
             if (options.callgraphHtml) {
                 const file = options.callgraphHtml;
-                exportCallGraphHtml(f, file, vr);
+                exportCallGraphHtml(f, file, vr, options.callgraphHtmlData);
                 logger.info(`Call graph written to ${file}`);
             }
 
