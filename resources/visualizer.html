@@ -713,8 +713,85 @@
         return true;
       }
 
+      /**
+       * Focus (ego subgraph): keep only the selected node(s) plus everything within
+       * `depth` hops along *visible* call edges, drop the rest, then re-fit the viewport.
+       *
+       * The dropped elements go into the same `removed` collection that `hide()` uses, so
+       * the existing `Expand all` / `Collapse all` / `Layout` buttons (which now all funnel
+       * through `hide()`) bring the whole graph back instead of inventing a second undo
+       * mechanism.
+       *
+       * Compound containers must survive: `remove()` cascades into descendants, so dropping
+       * a kept node's module/package ancestor would silently delete the kept node too (and a
+       * later `restore()` would reject the orphaned child). Hence `reached ∪ ancestors`.
+       * A selected *compound* seeds the BFS with its descendants, so focusing a module keeps
+       * the module's functions rather than just the empty container.
+       */
+      function focusSelected() {
+        const msg = document.getElementById("msg");
+        const selected = cy.$("node:selected");
+        if (selected.size() === 0) {
+          msg.textContent = "Focus: select a node first (nothing is selected).";
+          return;
+        }
+        const rawDepth = Number(document.getElementById("focusDepth").value);
+        const depth = Number.isFinite(rawDepth) ? Math.max(0, Math.floor(rawDepth)) : 2;
+
+        stopLayout();
+        const collapsed = cy.$("node.cy-expand-collapse-collapsed-node");
+        // Collapsed edges are aggregates and carry no `kind`; materialise them so the BFS
+        // sees the real call edges. Compounds themselves stay collapsed ("visible" graph).
+        ec.expandAllEdges();
+
+        // Bidirectional adjacency over visible call edges.
+        const adjacency = new Map();
+        cy.edges('edge[kind="call"]:visible').forEach(edge => {
+          const s = edge.source().id();
+          const t = edge.target().id();
+          if (!adjacency.has(s)) adjacency.set(s, []);
+          if (!adjacency.has(t)) adjacency.set(t, []);
+          adjacency.get(s).push(t);
+          adjacency.get(t).push(s);
+        });
+
+        const reached = new Set(selected.union(selected.descendants()).map(n => n.id()));
+        let frontier = [...reached];
+        for (let hop = 0; hop < depth && frontier.length > 0; hop++) {
+          const next = [];
+          for (const id of frontier)
+            for (const nb of adjacency.get(id) ?? [])
+              if (!reached.has(nb)) {
+                reached.add(nb);
+                next.push(nb);
+              }
+          frontier = next;
+        }
+
+        // Keep the reached nodes plus every compound ancestor (container).
+        let keep = cy.collection();
+        reached.forEach(id => {
+          const node = cy.getElementById(id);
+          if (node.nonempty())
+            keep = keep.union(node).union(node.ancestors());
+        });
+        // Edges are only kept when both endpoints survive.
+        keep = keep.union(cy.edges().filter(e => keep.contains(e.source()) && keep.contains(e.target())));
+
+        const drop = cy.elements().difference(keep);
+        if (drop.empty())
+          return; // whole visible graph is already within N hops: nothing to trim
+
+        const r = drop.remove();
+        removed = removed ? removed.union(r) : r;
+        ec.collapseRecursively(collapsed.intersection(keep));
+        ec.collapseAllEdges();
+        newLayout(true); // fit=true is the point: the trimmed subgraph fills the viewport
+      }
+
       document.getElementById("collapseAll").addEventListener("click", () => {
         stopLayout();
+        hide();
         ec.expandAllEdges();
         ec.collapseAll();
         ec.collapseAllEdges();
@@ -766,6 +843,9 @@
           newLayout();
         }
       });
+      document.getElementById("focusSelected").addEventListener("click", () => {
+        focusSelected();
+      });
       document.getElementById("removeSelected").addEventListener("click", () => {
         const es = cy.$(":selected");
         if (es.size() > 0) {
@@ -790,9 +870,12 @@
         }
       });
       document.getElementById("layout").addEventListener("click", () => {
-        stopLayout();
-        if (!document.getElementById("layout").classList.contains("shadow"))
-          newLayout();
+        // `hide()` restores anything removed via the `removed` collection (e.g. a Focus
+        // subgraph) before re-applying the threshold/unreachable filters.
+        if (document.getElementById("layout").classList.contains("shadow"))
+          return;
+        hide();
+        newLayout();
       });
       document.getElementById("hideUnreachable").addEventListener("change", () => {
         stopLayout();
@@ -947,6 +1030,11 @@
 <button id="showPredecessors">Show predecessors</button>
 <button id="removeSelected">Remove selected</button>
 <button id="removeNonSelected">Remove non-selected</button>
+</div>
+<br/>
+<div class="group">
+<button id="focusSelected">Focus</button>
+<label for="focusDepth"> Depth: </label><input type="number" id="focusDepth" value="2" min="0">
 </div>
 <br/>
 <div class="group">
