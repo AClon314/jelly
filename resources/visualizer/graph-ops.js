@@ -40,10 +40,17 @@ function hide() {
     queries.push("node[!isReachable]");
   if (queries.length > 0) {
     const nodes = cy.elements(queries.join(","));
+    // A collapsed compound keeps its children inside expand-collapse instead of in the
+    // graph, so they would not be part of `nodes` and could never be restored. Materialize
+    // every collapsed node we are about to delete (including a collapsed descendant of a
+    // matched compound), then take the descendants along explicitly. Only the doomed
+    // branches are touched, so unrelated folds keep their state.
+    const collapsed = nodes.union(nodes.descendants()).filter(".cy-expand-collapse-collapsed-node");
     ec.expandAllEdges();
-    ec.collapseRecursively(nodes);
+    if (collapsed.size() > 0)
+      ec.expandRecursively(collapsed);
     ec.collapseAllEdges();
-    const r = nodes.remove();
+    const r = nodes.union(nodes.descendants()).remove();
     removed = removed ? removed.union(r) : r;
   }
 }
